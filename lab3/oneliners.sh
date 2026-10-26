@@ -1,26 +1,36 @@
 #!/bin/bash
-log=access.log
+# Lab 3, Part 4 -- one pipeline per question about access.log.
+# Run it from the folder that contains access.log:   bash oneliners.sh
+# Log line format:  DATE TIME USER STATUS PAGE
 
-echo "=== Q1: Cereri esuate ==="
-grep -c FAIL "$log"
+LOG=access.log
+[ -r "$LOG" ] || { echo "oneliners.sh: $LOG not found in $(pwd)" >&2; exit 1; }
 
-echo "=== Q2: Pagini distincte ==="
-awk '{print $5}' "$log" | sort -u
+title() { printf '\n--- %s ---\n' "$*"; }
 
-echo "=== Q3: Accesari per pagina ==="
-awk '{print $5}' "$log" | sort | uniq -c
+title "Q1. How many requests failed?"
+awk '$4 == "FAIL"' "$LOG" | wc -l
 
-echo "=== Q4: Utilizatorul cu cele mai multe esecuri ==="
-grep FAIL "$log" | awk '{print $3}' | sort | uniq -c | sort -rn | head -1
+title "Q2. Which distinct pages were requested?"
+cut -d' ' -f5 "$LOG" | sort -u
 
-echo "=== Q5: user3 total si esuate ==="
-echo "total: $(grep -c ' user3 ' "$log"), failed: $(grep ' user3 ' "$log" | grep -c FAIL)"
+title "Q3. How many hits did each page get?"
+cut -d' ' -f5 "$LOG" | sort | uniq -c | sort -k2
 
-echo "=== Q6: Ultimele 3 cereri esuate (ora si utilizator) ==="
-grep FAIL "$log" | tail -3 | awk '{print $2, $3}'
+title "Q4. Which user has the most failures? (all users tied for first place)"
+awk '$4 == "FAIL" {print $3}' "$LOG" | sort | uniq -c | sort -k1,1nr -k2 |
+    awk 'NR == 1 {max = $1} $1 == max'
 
-echo "=== Q7: Shell-uri de login din /etc/passwd ==="
-cut -d: -f7 /etc/passwd | sort | uniq -c
+title "Q5. user3: all requests vs failed requests"
+awk '$3 == "user3" {all++; if ($4 == "FAIL") bad++}
+     END {printf "all=%d failed=%d\n", all, bad}' "$LOG"
 
-echo "=== Q8: Diferenta intre ls /etc si ls -l /etc ==="
-echo "ls /etc: $(ls /etc | wc -l), ls -l /etc: $(ls -l /etc | wc -l)"
+title "Q6. Time and user of the last 3 failures"
+grep -w FAIL "$LOG" | tail -n 3 | cut -d' ' -f2,3
+
+title "Q7. Login shells in /etc/passwd (count per shell)"
+awk -F: '{print $NF}' /etc/passwd | sort | uniq -c | sort -nr
+
+title "Q8. Lines printed by 'ls /etc' and by 'ls -l /etc'"
+printf 'ls /etc    -> %s lines\n' "$(ls /etc | wc -l)"
+printf 'ls -l /etc -> %s lines\n' "$(ls -l /etc | wc -l)"

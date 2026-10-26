@@ -1,65 +1,85 @@
+// find.c -- walk a directory tree and print every path whose last
+// component equals NAME.  Usage: find DIR NAME
+
 #include "kernel/types.h"
 #include "kernel/stat.h"
 #include "user/user.h"
 #include "kernel/fs.h"
+#include "kernel/fcntl.h"
 
-void
-find(char *path, char *target)
+static char path[512];
+
+// Return a pointer to the last component of p.
+static char *
+basename(char *p)
 {
-  char buf[512], *p;
-  int fd;
+  char *s = p + strlen(p);
+  while(s > p && s[-1] != '/')
+    s--;
+  return s;
+}
+
+// path[] holds the directory to scan; len is its current length.
+static void
+walk(int len, const char *name)
+{
   struct dirent de;
   struct stat st;
+  int fd, n;
 
-  if((fd = open(path, 0)) < 0){
+  if((fd = open(path, O_RDONLY)) < 0){
     fprintf(2, "find: cannot open %s\n", path);
     return;
   }
 
-  if(fstat(fd, &st) < 0){
-    fprintf(2, "find: cannot stat %s\n", path);
-    close(fd);
-    return;
-  }
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0)
+      continue;                         // free slot in the directory
+    if(strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
+      continue;                         // would loop forever
+    if(len + 1 + DIRSIZ + 1 > sizeof(path)){
+      fprintf(2, "find: path too long under %s\n", path);
+      break;
+    }
 
-  if(st.type == T_DIR){
-    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
-      printf("find: path too long\n");
-      close(fd);
-      return;
+    // append "/<entry>" (names are not always NUL-terminated)
+    path[len] = '/';
+    memmove(path + len + 1, de.name, DIRSIZ);
+    path[len + 1 + DIRSIZ] = 0;
+    n = strlen(path);
+
+    if(stat(path, &st) < 0){
+      fprintf(2, "find: cannot stat %s\n", path);
+    } else {
+      if(strcmp(basename(path), name) == 0)
+        printf("%s\n", path);
+      if(st.type == T_DIR)
+        walk(n, name);
     }
-    strcpy(buf, path);
-    p = buf + strlen(buf);
-    *p++ = '/';
-    while(read(fd, &de, sizeof(de)) == sizeof(de)){
-      if(de.inum == 0)
-        continue;
-      if(strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
-        continue;
-      memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0;
-      if(stat(buf, &st) < 0){
-        printf("find: cannot stat %s\n", buf);
-        continue;
-      }
-      if(strcmp(de.name, target) == 0){
-        printf("%s\n", buf);
-      }
-      if(st.type == T_DIR){
-        find(buf, target);
-      }
-    }
+    path[len] = 0;                      // cut back to the parent
   }
   close(fd);
 }
 
 int
-main(int argc, char *argv[])
+main(int argc, char **argv)
 {
-  if(argc < 3){
-    fprintf(2, "usage: find <dir> <name>\n");
+  struct stat st;
+
+  if(argc != 3){
+    fprintf(2, "Usage: find DIR NAME\n");
     exit(1);
   }
-  find(argv[1], argv[2]);
+  if(strlen(argv[1]) >= sizeof(path) - DIRSIZ - 2){
+    fprintf(2, "find: start path too long\n");
+    exit(1);
+  }
+  if(stat(argv[1], &st) < 0 || st.type != T_DIR){
+    fprintf(2, "find: %s is not a directory\n", argv[1]);
+    exit(1);
+  }
+
+  strcpy(path, argv[1]);
+  walk(strlen(path), argv[2]);
   exit(0);
 }
