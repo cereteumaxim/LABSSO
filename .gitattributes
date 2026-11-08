@@ -6,3 +6,5 @@ Makefile text eol=lf
 *.docx binary
 *.png binary
 *.jpeg binary
+*.h text eol=lf
+*.patch text eol=lf

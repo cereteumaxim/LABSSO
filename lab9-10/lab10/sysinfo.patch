@@ -1,0 +1,253 @@
+diff --git a/Makefile b/Makefile
+index a737f0c..fea1f44 100644
+--- a/Makefile
++++ b/Makefile
+@@ -148,6 +148,7 @@ UPROGS=\
+ 	$U/_wc\
+ 	$U/_zombie\
+ 	$U/_trace\
++	$U/_sysinfo\
+ 	$U/_logstress\
+ 	$U/_forphan\
+ 	$U/_dorphan\
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 0ae6896..6c66c4e 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -60,6 +60,7 @@ void            ireclaim(int);
+ void*           kalloc(void);
+ void            kfree(void *);
+ void            kinit(void);
++uint64          kfreemem(void);
+ 
+ // log.c
+ void            initlog(int, struct superblock*);
+@@ -103,6 +104,7 @@ void            yield(void);
+ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
++uint64          nproc_used(void);
+ 
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index 2fcec38..679d971 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -80,3 +80,17 @@ kalloc(void)
+     memset((char *)r, 5, PGSIZE); // fill with junk
+   return (void *)r;
+ }
++
++// Bytes of free physical memory: walk the free list, one page per entry.
++uint64
++kfreemem(void)
++{
++  struct run *r;
++  uint64 n = 0;
++
++  acquire(&kmem.lock);
++  for (r = kmem.freelist; r; r = r->next)
++    n++;
++  release(&kmem.lock);
++  return n * PGSIZE;
++}
+diff --git a/kernel/proc.c b/kernel/proc.c
+index ee8a92b..e526fc2 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -702,3 +702,19 @@ procdump(void)
+     printk("\n");
+   }
+ }
++
++// Number of slots in the process table that are in use.
++uint64
++nproc_used(void)
++{
++  struct proc *p;
++  uint64 n = 0;
++
++  for (p = proc; p < &proc[NPROC]; p++) {
++    acquire(&p->lock);
++    if (p->state != UNUSED)
++      n++;
++    release(&p->lock);
++  }
++  return n;
++}
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index d12b7c6..e006c0c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -104,6 +104,7 @@ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
+ extern uint64 sys_sync(void);
+ extern uint64 sys_trace(void);
++extern uint64 sys_sysinfo(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -132,6 +133,7 @@ static uint64 (*syscalls[])(void) = {
+   [SYS_close]   = sys_close,
+   [SYS_sync]    = sys_sync,
+   [SYS_trace]   = sys_trace,
++  [SYS_sysinfo] = sys_sysinfo,
+   // clang-format on
+ };
+ 
+@@ -144,7 +146,7 @@ static char *syscallnames[] = {
+   [SYS_pause] "pause", [SYS_uptime] "uptime", [SYS_open] "open",
+   [SYS_write] "write", [SYS_mknod] "mknod",   [SYS_unlink] "unlink",
+   [SYS_link] "link",   [SYS_mkdir] "mkdir",   [SYS_close] "close",
+-  [SYS_sync] "sync",   [SYS_trace] "trace",
++  [SYS_sync] "sync",   [SYS_trace] "trace",   [SYS_sysinfo] "sysinfo",
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index f66fb28..3b769fd 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -22,3 +22,4 @@
+ #define SYS_close  21
+ #define SYS_sync   22
+ #define SYS_trace  23
++#define SYS_sysinfo 24
+diff --git a/kernel/sysinfo.h b/kernel/sysinfo.h
+new file mode 100755
+index 0000000..53f30e4
+--- /dev/null
++++ b/kernel/sysinfo.h
+@@ -0,0 +1,5 @@
++// What the sysinfo system call fills in for the caller.
++struct sysinfo {
++  uint64 freemem; // free physical memory, in bytes
++  uint64 nproc;   // processes whose state is not UNUSED
++};
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index a03a33e..040b42b 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -6,6 +6,7 @@
+ #include "spinlock.h"
+ #include "proc.h"
+ #include "vm.h"
++#include "sysinfo.h"
+ 
+ uint64
+ sys_exit(void)
+@@ -120,3 +121,19 @@ sys_trace(void)
+   myproc()->trace_mask = mask;
+   return 0;
+ }
++
++// sysinfo(struct sysinfo *): copy free memory and process count to user space
++uint64
++sys_sysinfo(void)
++{
++  uint64 addr;
++  struct sysinfo info;
++  struct proc *p = myproc();
++
++  argaddr(0, &addr);
++  info.freemem = kfreemem();
++  info.nproc = nproc_used();
++  if (copyout(p->pagetable, p->sz, addr, (char *)&info, sizeof(info)) < 0)
++    return -1;
++  return 0;
++}
+diff --git a/user/sysinfo.c b/user/sysinfo.c
+new file mode 100755
+index 0000000..0e1095d
+--- /dev/null
++++ b/user/sysinfo.c
+@@ -0,0 +1,59 @@
++// sysinfo: show free memory and the number of processes, then change both
++// on purpose and show them again.
++#include "kernel/types.h"
++#include "kernel/sysinfo.h"
++#include "user/user.h"
++
++#define PAGE 4096
++
++static struct sysinfo
++show(char *when)
++{
++  struct sysinfo si;
++
++  if (sysinfo(&si) < 0) {
++    fprintf(2, "sysinfo: failed\n");
++    exit(1);
++  }
++  printf("%s free %ld bytes (%ld pages), %ld processes\n",
++         when, si.freemem, si.freemem / PAGE, si.nproc);
++  return si;
++}
++
++int
++main(void)
++{
++  struct sysinfo a, b;
++  int pid, fd[2];
++  char c;
++
++  a = show("at start:            ");
++
++  // 1. grow the heap by 10 pages: free memory must go down
++  if (sbrk(10 * PAGE) == SBRK_ERROR) {
++    fprintf(2, "sysinfo: sbrk failed\n");
++    exit(1);
++  }
++  memset(sbrk(0) - 10 * PAGE, 1, 10 * PAGE); // touch the pages
++  b = show("after sbrk(10 pages):");
++  printf("  memory used: %ld pages\n", (a.freemem - b.freemem) / PAGE);
++
++  // 2. a child that waits on a pipe: one more process
++  pipe(fd);
++  pid = fork();
++  if (pid == 0) {
++    close(fd[1]);
++    read(fd[0], &c, 1); // blocks until the parent closes its end
++    exit(0);
++  }
++  close(fd[0]);
++  show("with a child alive:  ");
++  close(fd[1]);
++  wait(0);
++  show("after wait:          ");
++
++  // 3. a bad pointer must be refused, not crash the kernel
++  if (sysinfo((struct sysinfo *)0xffffffffff) < 0)
++    printf("bad pointer: sysinfo returned -1\n");
++  exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index b8002ab..4b02e56 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -1,6 +1,7 @@
+ #define SBRK_ERROR ((char *)-1)
+ 
+ struct stat;
++struct sysinfo;
+ 
+ // system calls
+ int fork(void);
+@@ -26,6 +27,7 @@ int pause(int);
+ int uptime(void);
+ int sync(void);
+ int trace(int);
++int sysinfo(struct sysinfo *);
+ 
+ // ulib.c
+ int stat(const char *, struct stat *);
+diff --git a/user/usys.pl b/user/usys.pl
+index f9185b5..a49625b 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -44,3 +44,4 @@ entry("pause");
+ entry("uptime");
+ entry("sync");
+ entry("trace");
++entry("sysinfo");
